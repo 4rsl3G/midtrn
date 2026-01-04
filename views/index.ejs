@@ -1,0 +1,86 @@
+<%
+  const content = `
+  <section class="grid lg:grid-cols-2 gap-6 items-start">
+    <div class="glow rounded-2xl border border-white/10 bg-white/5 p-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h1 class="text-2xl font-semibold">Checkout QRIS (Dinamis)</h1>
+          <p class="text-zinc-400 mt-1">Isi nominal, generate QR, scan pakai e-wallet yang support QRIS.</p>
+        </div>
+        <div class="hidden lg:flex floaty">
+          <div class="h-14 w-14 rounded-2xl bg-indigo-500/15 border border-indigo-400/20 flex items-center justify-center">
+            <i class="ri-sparkling-2-line text-2xl text-indigo-200"></i>
+          </div>
+        </div>
+      </div>
+
+      <form action="/pay" method="POST" class="mt-6 space-y-4">
+        <div class="grid sm:grid-cols-2 gap-4">
+          <label class="block">
+            <span class="text-sm text-zinc-300">Nama item</span>
+            <input name="itemName" required
+              class="mt-2 w-full rounded-xl bg-zinc-950/60 border border-white/10 px-4 py-3 outline-none focus:border-white/25"
+              placeholder="Contoh: Kopi Susu" />
+          </label>
+
+          <label class="block">
+            <span class="text-sm text-zinc-300">Qty</span>
+            <input name="qty" type="number" min="1" value="1" required
+              class="mt-2 w-full rounded-xl bg-zinc-950/60 border border-white/10 px-4 py-3 outline-none focus:border-white/25" />
+          </label>
+        </div>
+
+        <label class="block">
+          <span class="text-sm text-zinc-300">Nominal (IDR)</span>
+          <div class="mt-2 flex items-center gap-2 rounded-xl bg-zinc-950/60 border border-white/10 px-4 py-3 focus-within:border-white/25">
+            <i class="ri-money-dollar-circle-line text-lg text-zinc-300"></i>
+            <input name="amount" type="number" min="1000" step="1000" required
+              class="w-full bg-transparent outline-none"
+              placeholder="Misal: 25000" />
+          </div>
+          <p class="text-xs text-zinc-500 mt-2">Minimal demo: 1000. Untuk production ikuti aturan akun/payment channel.</p>
+        </label>
+
+        <button type="submit"
+          class="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-white text-zinc-950 px-5 py-3 font-semibold hover:opacity-90 active:opacity-80 transition">
+          <i class="ri-qr-code-line"></i>
+          Buat QRIS
+        </button>
+      </form>
+    </div>
+
+    <div class="rounded-2xl border border-white/10 bg-white/5 p-6">
+      <h2 class="font-semibold text-lg">Alur Singkat</h2>
+      <ol class="mt-4 space-y-3 text-sm text-zinc-300">
+        <li class="flex gap-3">
+          <span class="mt-0.5 h-6 w-6 rounded-lg bg-white/10 border border-white/10 flex items-center justify-center text-xs">1</span>
+          Backend hit <code class="px-2 py-0.5 rounded bg-white/10 border border-white/10">/charge</code> dengan <code>payment_type: qris</code>.
+        </li>
+        <li class="flex gap-3">
+          <span class="mt-0.5 h-6 w-6 rounded-lg bg-white/10 border border-white/10 flex items-center justify-center text-xs">2</span>
+          Tampilkan QR dari response (umumnya <code>actions[].url</code>).  [oai_citation:9‡Midtrans Documentation](https://docs.midtrans.com/reference/qris?utm_source=chatgpt.com)
+        </li>
+        <li class="flex gap-3">
+          <span class="mt-0.5 h-6 w-6 rounded-lg bg-white/10 border border-white/10 flex items-center justify-center text-xs">3</span>
+          Cek status via polling <code>/v2/{order_id}/status</code> atau webhook.
+        </li>
+        <li class="flex gap-3">
+          <span class="mt-0.5 h-6 w-6 rounded-lg bg-white/10 border border-white/10 flex items-center justify-center text-xs">4</span>
+          Webhook diverifikasi dengan <code>signature_key</code> (SHA512).  [oai_citation:10‡Midtrans Documentation](https://docs.midtrans.com/reference/handle-notifications?utm_source=chatgpt.com)
+        </li>
+      </ol>
+
+      <div class="mt-6 p-4 rounded-xl bg-indigo-500/10 border border-indigo-400/20 text-sm text-indigo-100">
+        <div class="font-semibold flex items-center gap-2">
+          <i class="ri-information-line"></i> Catatan
+        </div>
+        <p class="mt-2 text-indigo-100/90">
+          Ini demo UI + flow. Untuk production: simpan transaksi ke DB, handle idempotency, dan amankan webhook dengan HTTPS.
+        </p>
+      </div>
+    </div>
+  </section>
+  `;
+%>
+
+<%- include("layout", { title, body: content }) %>
