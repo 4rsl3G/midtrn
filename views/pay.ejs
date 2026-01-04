@@ -1,0 +1,158 @@
+<%
+  const content = `
+  <section class="grid lg:grid-cols-2 gap-6 items-start">
+    <div class="glow rounded-2xl border border-white/10 bg-white/5 p-6">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <h1 class="text-2xl font-semibold">Scan untuk bayar</h1>
+          <p class="text-zinc-400 mt-1">Order: <span class="font-mono text-zinc-200">${trx.orderId}</span></p>
+        </div>
+        <a href="/" class="text-sm text-zinc-300 hover:text-white inline-flex items-center gap-2">
+          <i class="ri-arrow-left-line"></i> Kembali
+        </a>
+      </div>
+
+      <div class="mt-6 grid sm:grid-cols-2 gap-4">
+        <div class="rounded-xl border border-white/10 bg-zinc-950/40 p-4">
+          <div class="text-xs text-zinc-400">Item</div>
+          <div class="mt-1 font-semibold">${trx.itemName}</div>
+          <div class="text-xs text-zinc-500 mt-1">Qty: ${trx.qty}</div>
+        </div>
+        <div class="rounded-xl border border-white/10 bg-zinc-950/40 p-4">
+          <div class="text-xs text-zinc-400">Total</div>
+          <div class="mt-1 font-semibold">Rp ${Number(trx.grossAmount).toLocaleString("id-ID")}</div>
+          <div class="text-xs text-zinc-500 mt-1">Status: <span id="statusBadge" class="font-mono">${trx.status}</span></div>
+        </div>
+      </div>
+
+      <div class="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
+        <div class="flex items-center justify-between">
+          <div class="font-semibold flex items-center gap-2">
+            <i class="ri-qr-code-line"></i> QRIS
+          </div>
+          <button id="copyOrder" class="text-xs text-zinc-300 hover:text-white inline-flex items-center gap-2">
+            <i class="ri-file-copy-line"></i> Copy Order ID
+          </button>
+        </div>
+
+        ${
+          trx.qrUrl
+            ? `
+              <div class="mt-4 flex items-center justify-center">
+                <div class="rounded-2xl bg-white p-4 floaty">
+                  <img src="${trx.qrUrl}" alt="QRIS" class="h-64 w-64 object-contain" />
+                </div>
+              </div>
+              <p class="text-xs text-zinc-400 mt-4 text-center">
+                Scan pakai GoPay/ShopeePay/OVO/banking app yang support QRIS.
+              </p>
+            `
+            : `
+              <div class="mt-4 p-4 rounded-xl bg-amber-500/10 border border-amber-400/20 text-amber-100 text-sm">
+                QR URL tidak ditemukan di response. Cek response Core API /charge.
+              </div>
+            `
+        }
+
+        <div class="mt-6 flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+          <button id="checkNow"
+            class="inline-flex items-center justify-center gap-2 rounded-xl bg-white text-zinc-950 px-5 py-3 font-semibold hover:opacity-90 active:opacity-80 transition">
+            <i class="ri-refresh-line"></i> Cek Status Sekarang
+          </button>
+
+          <div class="text-xs text-zinc-500">
+            Auto-check tiap <span class="text-zinc-300 font-mono">3s</span> (stop kalau sudah settlement/capture).
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-2xl border border-white/10 bg-white/5 p-6">
+      <h2 class="font-semibold text-lg">Tips UX (Simple)</h2>
+      <ul class="mt-4 space-y-3 text-sm text-zinc-300">
+        <li class="flex gap-3">
+          <i class="ri-checkbox-circle-line text-green-300 mt-0.5"></i>
+          Tampilkan status real-time via polling status API atau webhook.
+        </li>
+        <li class="flex gap-3">
+          <i class="ri-checkbox-circle-line text-green-300 mt-0.5"></i>
+          Setelah sukses, arahkan user ke halaman “Success” + ringkasan order.
+        </li>
+        <li class="flex gap-3">
+          <i class="ri-checkbox-circle-line text-green-300 mt-0.5"></i>
+          Pastikan webhook diverifikasi signature_key sebelum update status.  [oai_citation:11‡Midtrans Documentation](https://docs.midtrans.com/docs/https-notification-webhooks?utm_source=chatgpt.com)
+        </li>
+      </ul>
+
+      <div class="mt-6 p-4 rounded-xl bg-white/5 border border-white/10">
+        <div class="text-xs text-zinc-400 mb-2">Debug (opsional)</div>
+        <pre class="text-xs text-zinc-300 overflow-auto"><code>${JSON.stringify(trx.rawChargeResponse, null, 2)}</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    const orderId = ${JSON.stringify(trx.orderId)};
+    const statusBadge = document.getElementById("statusBadge");
+    const checkNowBtn = document.getElementById("checkNow");
+    const copyOrderBtn = document.getElementById("copyOrder");
+
+    function setBadge(status) {
+      statusBadge.textContent = status;
+      const map = {
+        settlement: "text-green-300",
+        capture: "text-green-300",
+        pending: "text-amber-300",
+        expire: "text-rose-300",
+        cancel: "text-rose-300",
+        deny: "text-rose-300",
+        failure: "text-rose-300"
+      };
+      statusBadge.className = "font-mono " + (map[status] || "text-zinc-200");
+    }
+
+    async function fetchStatus(silent=false) {
+      try {
+        const r = await fetch("/api/status/" + encodeURIComponent(orderId));
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.message || "failed");
+        const s = j.transactionStatus || "unknown";
+        setBadge(s);
+
+        if (!silent) {
+          if (s === "settlement" || s === "capture") toastr.success("Pembayaran sukses ✅");
+          else if (s === "pending") toastr.info("Masih menunggu pembayaran…");
+          else if (["expire","cancel","deny","failure"].includes(s)) toastr.error("Pembayaran gagal/expired.");
+          else toastr.warning("Status: " + s);
+        }
+
+        return s;
+      } catch (e) {
+        if (!silent) toastr.error("Gagal cek status.");
+        return "error";
+      }
+    }
+
+    checkNowBtn.addEventListener("click", () => fetchStatus(false));
+
+    copyOrderBtn.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(orderId);
+      toastr.success("Order ID tersalin");
+    });
+
+    // auto polling
+    let timer = setInterval(async () => {
+      const s = await fetchStatus(true);
+      if (s === "settlement" || s === "capture" || ["expire","cancel","deny","failure"].includes(s)) {
+        clearInterval(timer);
+        fetchStatus(false);
+      }
+    }, 3000);
+
+    // initial
+    setBadge(${JSON.stringify(trx.status)});
+  </script>
+  `;
+%>
+
+<%- include("layout", { title, body: content }) %>
