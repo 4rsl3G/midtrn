@@ -1,4 +1,3 @@
-// server.js
 import "dotenv/config";
 import express from "express";
 import CryptoJS from "crypto-js";
@@ -12,36 +11,78 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use("/public", express.static("public"));
 
-/**
- * Simpan transaksi di memori biar simpel.
- * (Untuk production: simpan di DB.)
- */
+/** In-memory DB (demo) */
 const db = new Map();
-/**
- * db.set(orderId, {
- *   orderId, grossAmount, itemName, qty, status, qrUrl, rawChargeResponse
- * })
- */
 
 function makeOrderId() {
-  // order_id harus unik
   return `ORDER-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function normalizeStatus(s) {
+  return (s || "unknown").toString();
+}
+
+function isFinalStatus(s) {
+  return ["settlement", "capture", "expire", "cancel", "deny", "failure"].includes(s);
+}
+
+/**
+ * Midtrans custom_expiry.order_time must follow:
+ * yyyy-MM-dd HH:mm:ss Z  (eg 2525-06-09 15:07:00 +0700)
+ */
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+/**
+ * Format date with explicit offset +0000 (UTC).
+ * Example: 2026-01-04 23:40:41 +0000
+ */
+function formatMidtransOrderTimeUTC(date = new Date()) {
+  const y = date.getUTCFullYear();
+  const m = pad2(date.getUTCMonth() + 1);
+  const d = pad2(date.getUTCDate());
+  const hh = pad2(date.getUTCHours());
+  const mm = pad2(date.getUTCMinutes());
+  const ss = pad2(date.getUTCSeconds());
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss} +0000`;
+}
+
+/** ===== Shell page ===== */
 app.get("/", (req, res) => {
-  res.render("index", { title: "Checkout QRIS Dinamis" });
+  res.render("app", { title: "QRIS Dinamis AJAX" });
 });
 
-app.post("/pay", async (req, res) => {
+/** ===== Partials for AJAX navigation ===== */
+app.get("/partial/checkout", (req, res) => res.render("partials/checkout"));
+app.get("/partial/pay/:orderId", (req, res) => {
+  const trx = db.get(req.params.orderId);
+  if (!trx) return res.status(404).send("Order tidak ditemukan.");
+  res.render("partials/pay", { trx });
+});
+app.get("/partial/success/:orderId", (req, res) => {
+  const trx = db.get(req.params.orderId);
+  if (!trx) return res.status(404).send("Order tidak ditemukan.");
+  res.render("partials/success", { trx });
+});
+app.get("/partial/failed/:orderId", (req, res) => {
+  const trx = db.get(req.params.orderId);
+  if (!trx) return res.status(404).send("Order tidak ditemukan.");
+  res.render("partials/failed", { trx });
+});
+
+/** ===== API: Create QRIS (AJAX) ===== */
+app.post("/api/qris/create", async (req, res) => {
   try {
     const itemName = (req.body.itemName || "Produk").toString().slice(0, 50);
-    const grossAmount = Number(req.body.amount || 0);
     const qty = Math.max(1, Number(req.body.qty || 1));
+    const unitPrice = Number(req.body.amount || 0);
 
-    if (!Number.isFinite(grossAmount) || grossAmount < 1000) {
-      return res.status(400).send("Amount minimal 1000");
+    if (!Number.isFinite(unitPrice) || unitPrice < 1000) {
+      return res.status(400).json({ ok: false, message: "Nominal minimal 1000" });
     }
 
+    const grossAmount = Math.round(unitPrice * qty);
     const orderId = makeOrderId();
 
     const payload = {
@@ -53,83 +94,84 @@ app.post("/pay", async (req, res) => {
       item_details: [
         {
           id: "item-1",
-          price: grossAmount,
+          price: Math.round(unitPrice),
           quantity: qty,
           name: itemName
         }
       ],
-      // optional:
-      // customer_details: { first_name, last_name, email, phone }
-      // qris: { acquirer: "gopay" } // kalau mau spesifik acquirer (opsional, tergantung akun)
+      // ✅ FIX: correct order_time format
       custom_expiry: {
-        order_time: new Date().toISOString(),
+        order_time: formatMidtransOrderTimeUTC(new Date()),
         expiry_duration: 15,
         unit: "minute"
       }
     };
 
-    // Buat transaksi QRIS dinamis via Core API /charge  [oai_citation:3‡Midtrans Documentation](https://docs.midtrans.com/reference/qris?utm_source=chatgpt.com)
     const chargeResponse = await coreApi.charge(payload);
     const qrUrl = extractQrUrl(chargeResponse);
 
-    db.set(orderId, {
+    if (!qrUrl) {
+      console.error("Charge OK but QR url not found:", chargeResponse);
+      return res.status(500).json({ ok: false, message: "QR URL tidak ditemukan di response." });
+    }
+
+    const trx = {
       orderId,
-      grossAmount,
       itemName,
       qty,
+      unitPrice: Math.round(unitPrice),
+      grossAmount,
       status: "pending",
       qrUrl,
+      createdAt: new Date().toISOString(),
       rawChargeResponse: chargeResponse
-    });
-
-    return res.redirect(`/pay/${orderId}`);
-  } catch (e) {
-    console.error(e);
-    return res.status(500).send("Gagal membuat transaksi QRIS.");
-  }
-});
-
-app.get("/pay/:orderId", (req, res) => {
-  const { orderId } = req.params;
-  const trx = db.get(orderId);
-  if (!trx) return res.status(404).send("Order tidak ditemukan.");
-
-  res.render("pay", {
-    title: "Scan QRIS",
-    trx
-  });
-});
-
-app.get("/api/status/:orderId", async (req, res) => {
-  const { orderId } = req.params;
-  const trx = db.get(orderId);
-  if (!trx) return res.status(404).json({ ok: false, message: "Not found" });
-
-  try {
-    // GET status API: /v2/{order_id}/status  [oai_citation:4‡Midtrans Documentation](https://docs.midtrans.com/docs/get-status-api-requests?utm_source=chatgpt.com)
-    const status = await coreApi.transaction.status(orderId);
-
-    // map status sederhana
-    const transactionStatus = status?.transaction_status || "unknown";
-    trx.status = transactionStatus;
+    };
     db.set(orderId, trx);
 
-    return res.json({ ok: true, orderId, transactionStatus, status });
+    return res.json({ ok: true, orderId });
   } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, message: "Failed to fetch status" });
+    // return Midtrans validation message if exists
+    const apiMsg = e?.ApiResponse?.validation_messages?.[0] || e?.ApiResponse?.status_message;
+    console.error("MIDTRANS CHARGE ERROR:", apiMsg || e?.message || e);
+
+    return res.status(500).json({
+      ok: false,
+      message: apiMsg || "Gagal membuat QRIS. Cek SERVER_KEY / payload / logs."
+    });
   }
 });
 
-/**
- * Webhook Midtrans: verifikasi signature_key
- * signature = SHA512(order_id + status_code + gross_amount + serverKey)  [oai_citation:5‡Midtrans Documentation](https://docs.midtrans.com/reference/handle-notifications?utm_source=chatgpt.com)
- */
+/** ===== API: Status (AJAX) ===== */
+app.get("/api/qris/status/:orderId", async (req, res) => {
+  const { orderId } = req.params;
+  const trx = db.get(orderId);
+  if (!trx) return res.status(404).json({ ok: false, message: "Order tidak ditemukan." });
+
+  try {
+    const statusResp = await coreApi.transaction.status(orderId);
+    const s = normalizeStatus(statusResp?.transaction_status);
+
+    trx.status = s;
+    trx.statusDetail = statusResp;
+    db.set(orderId, trx);
+
+    return res.json({
+      ok: true,
+      orderId,
+      status: s,
+      isFinal: isFinalStatus(s)
+    });
+  } catch (e) {
+    console.error("STATUS ERROR:", e?.message || e);
+    return res.status(500).json({ ok: false, message: "Gagal mengambil status." });
+  }
+});
+
+/** ===== Webhook (optional but recommended) ===== */
 app.post("/midtrans/notification", async (req, res) => {
   try {
     const n = req.body || {};
     const { order_id, status_code, gross_amount, signature_key } = n;
-
     if (!order_id || !status_code || !gross_amount || !signature_key) {
       return res.status(400).send("Bad request");
     }
@@ -138,26 +180,21 @@ app.post("/midtrans/notification", async (req, res) => {
     const raw = `${order_id}${status_code}${gross_amount}${serverKey}`;
     const expected = CryptoJS.SHA512(raw).toString(CryptoJS.enc.Hex);
 
-    if (expected !== signature_key) {
-      return res.status(401).send("Invalid signature");
-    }
+    if (expected !== signature_key) return res.status(401).send("Invalid signature");
 
-    // (Opsional tapi disarankan) verifikasi lagi pakai GET status API  [oai_citation:6‡Midtrans Documentation](https://docs.midtrans.com/docs/https-notification-webhooks?utm_source=chatgpt.com)
-    const status = await coreApi.transaction.status(order_id);
+    const statusResp = await coreApi.transaction.status(order_id);
+    const s = normalizeStatus(statusResp?.transaction_status);
+
     const trx = db.get(order_id) || { orderId: order_id };
-    trx.status = status?.transaction_status || trx.status || "unknown";
-    trx.statusDetail = status;
+    trx.status = s;
+    trx.statusDetail = statusResp;
     db.set(order_id, trx);
 
-    // Balas 200 biar Midtrans anggap sukses  [oai_citation:7‡Midtrans Documentation](https://docs.midtrans.com/reference/best-practices-to-handle-notification?utm_source=chatgpt.com)
     return res.status(200).json({ received: true });
   } catch (e) {
-    console.error(e);
-    // 500 => Midtrans bisa retry  [oai_citation:8‡Midtrans Documentation](https://docs.midtrans.com/reference/best-practices-to-handle-notification?utm_source=chatgpt.com)
+    console.error("WEBHOOK ERROR:", e?.message || e);
     return res.status(500).send("Error");
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running: http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`Running http://localhost:${PORT}`));
