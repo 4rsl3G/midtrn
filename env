@@ -1,0 +1,8 @@
+PORT=3000
+
+# Ambil dari Midtrans Dashboard
+MIDTRANS_SERVER_KEY=SB-Mid-server-xxxxxxxxxxxxxxxx
+MIDTRANS_IS_PRODUCTION=false
+
+# URL publik buat webhook (kalau lokal, pakai ngrok)
+PUBLIC_BASE_URL=https://your-domain-or-ngrok.app
