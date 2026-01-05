@@ -4,14 +4,18 @@ import CryptoJS from "crypto-js";
 import { coreApi, extractQrUrl } from "./midtrans.js";
 
 const app = express();
+
+// NOTE: di Vercel, PORT tidak dipakai untuk listen (serverless)
 const PORT = Number(process.env.PORT || 3000);
 
 app.set("view engine", "ejs");
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-app.use("/public", express.static("public"));
 
-/** In-memory DB (demo) */
+// Static (local & platform yang support). Di Vercel, pastikan vercel.json route static benar.
+app.use("/public", express.static("public", { maxAge: "1h", etag: true }));
+
+/** In-memory DB (demo). Production: pakai DB */
 const db = new Map();
 
 function makeOrderId() {
@@ -27,7 +31,7 @@ function isFinalStatus(s) {
 }
 
 /**
- * Midtrans custom_expiry.order_time must follow:
+ * Midtrans custom_expiry.order_time format:
  * yyyy-MM-dd HH:mm:ss Z  (eg 2525-06-09 15:07:00 +0700)
  */
 function pad2(n) {
@@ -55,16 +59,19 @@ app.get("/", (req, res) => {
 
 /** ===== Partials for AJAX navigation ===== */
 app.get("/partial/checkout", (req, res) => res.render("partials/checkout"));
+
 app.get("/partial/pay/:orderId", (req, res) => {
   const trx = db.get(req.params.orderId);
   if (!trx) return res.status(404).send("Order tidak ditemukan.");
   res.render("partials/pay", { trx });
 });
+
 app.get("/partial/success/:orderId", (req, res) => {
   const trx = db.get(req.params.orderId);
   if (!trx) return res.status(404).send("Order tidak ditemukan.");
   res.render("partials/success", { trx });
 });
+
 app.get("/partial/failed/:orderId", (req, res) => {
   const trx = db.get(req.params.orderId);
   if (!trx) return res.status(404).send("Order tidak ditemukan.");
@@ -74,7 +81,7 @@ app.get("/partial/failed/:orderId", (req, res) => {
 /** ===== API: Create QRIS (AJAX) ===== */
 app.post("/api/qris/create", async (req, res) => {
   try {
-    const itemName = (req.body.itemName || "Produk").toString().slice(0, 50);
+    const itemName = (req.body.itemName || "Produk").toString().trim().slice(0, 50);
     const qty = Math.max(1, Number(req.body.qty || 1));
     const unitPrice = Number(req.body.amount || 0);
 
@@ -96,10 +103,16 @@ app.post("/api/qris/create", async (req, res) => {
           id: "item-1",
           price: Math.round(unitPrice),
           quantity: qty,
-          name: itemName
+          name: itemName || "Produk"
         }
       ],
-      // ✅ FIX: correct order_time format
+
+      // ✅ Paksa menggunakan QRIS Dinamis GoPay (kalau channel aktif di akun production kamu)
+      qris: {
+        acquirer: "gopay"
+      },
+
+      // ✅ Format benar (hindari error 400 format)
       custom_expiry: {
         order_time: formatMidtransOrderTimeUTC(new Date()),
         expiry_duration: 15,
@@ -117,7 +130,7 @@ app.post("/api/qris/create", async (req, res) => {
 
     const trx = {
       orderId,
-      itemName,
+      itemName: itemName || "Produk",
       qty,
       unitPrice: Math.round(unitPrice),
       grossAmount,
@@ -126,13 +139,17 @@ app.post("/api/qris/create", async (req, res) => {
       createdAt: new Date().toISOString(),
       rawChargeResponse: chargeResponse
     };
-    db.set(orderId, trx);
 
+    db.set(orderId, trx);
     return res.json({ ok: true, orderId });
   } catch (e) {
-    // return Midtrans validation message if exists
-    const apiMsg = e?.ApiResponse?.validation_messages?.[0] || e?.ApiResponse?.status_message;
-    console.error("MIDTRANS CHARGE ERROR:", apiMsg || e?.message || e);
+    const apiMsg =
+      e?.ApiResponse?.validation_messages?.[0] ||
+      e?.ApiResponse?.status_message ||
+      e?.message;
+
+    console.error("MIDTRANS CHARGE ERROR:", apiMsg);
+    if (e?.ApiResponse) console.error("ApiResponse:", e.ApiResponse);
 
     return res.status(500).json({
       ok: false,
@@ -145,6 +162,7 @@ app.post("/api/qris/create", async (req, res) => {
 app.get("/api/qris/status/:orderId", async (req, res) => {
   const { orderId } = req.params;
   const trx = db.get(orderId);
+
   if (!trx) return res.status(404).json({ ok: false, message: "Order tidak ditemukan." });
 
   try {
@@ -167,11 +185,12 @@ app.get("/api/qris/status/:orderId", async (req, res) => {
   }
 });
 
-/** ===== Webhook (optional but recommended) ===== */
+/** ===== Webhook (recommended) ===== */
 app.post("/midtrans/notification", async (req, res) => {
   try {
     const n = req.body || {};
     const { order_id, status_code, gross_amount, signature_key } = n;
+
     if (!order_id || !status_code || !gross_amount || !signature_key) {
       return res.status(400).send("Bad request");
     }
@@ -182,6 +201,7 @@ app.post("/midtrans/notification", async (req, res) => {
 
     if (expected !== signature_key) return res.status(401).send("Invalid signature");
 
+    // double-check status via API (lebih aman)
     const statusResp = await coreApi.transaction.status(order_id);
     const s = normalizeStatus(statusResp?.transaction_status);
 
@@ -197,4 +217,13 @@ app.post("/midtrans/notification", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`Running http://localhost:${PORT}`));
+/**
+ * ✅ Vercel handler support:
+ * - Vercel serverless butuh `export default app`
+ * - Local dev tetap bisa listen
+ */
+export default app;
+
+if (process.env.VERCEL !== "1") {
+  app.listen(PORT, () => console.log(`Running http://localhost:${PORT}`));
+}
