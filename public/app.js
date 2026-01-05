@@ -10,8 +10,7 @@ const App = {
 
     window.addEventListener("popstate", (e) => {
       const st = e.state || {};
-      if (st.view === "pay" && st.orderId) this.loadPay(st.orderId, false);
-      else if (st.view === "success" && st.orderId) this.loadSuccess(st.orderId, false);
+      if (st.view === "success" && st.orderId) this.loadSuccess(st.orderId, false);
       else if (st.view === "failed" && st.orderId) this.loadFailed(st.orderId, false);
       else this.loadCheckout(false);
     });
@@ -72,18 +71,30 @@ const App = {
   async loadCheckout(push = true) {
     this.stopPolling();
     this.setSkeleton();
-    const html = await $.get("/partial/checkout");
-    this.setView(html);
-    if (push) history.pushState({ view: "checkout" }, "", "/");
-  },
-
-  async loadPay(orderId, push = true) {
-    this.stopPolling();
-    this.setSkeleton();
-    const html = await $.get(`/partial/pay/${encodeURIComponent(orderId)}`);
-    this.setView(html);
-    if (push) history.pushState({ view: "pay", orderId }, "", `#/pay/${orderId}`);
-    this.startPolling(orderId);
+    try {
+      const html = await $.get("/partial/checkout");
+      this.setView(html);
+      if (push) history.pushState({ view: "checkout" }, "", "/");
+    } catch (e) {
+      this.setView(`
+        <div class="rounded-2xl bg-white shadow-soft ring-1 ring-slate-200 p-6">
+          <div class="flex items-start gap-3">
+            <div class="h-10 w-10 rounded-xl bg-rose-600 text-white flex items-center justify-center">
+              <i class="ri-error-warning-line"></i>
+            </div>
+            <div>
+              <div class="font-semibold">Gagal memuat checkout</div>
+              <div class="text-sm text-slate-600 mt-1">Endpoint /partial/checkout tidak merespons.</div>
+              <button data-nav="checkout"
+                class="mt-3 inline-flex items-center gap-2 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white">
+                <i class="ri-refresh-line"></i> Coba lagi
+              </button>
+            </div>
+          </div>
+        </div>
+      `);
+      toastr.error("Partial checkout gagal dimuat.");
+    }
   },
 
   async loadSuccess(orderId, push = true) {
@@ -105,10 +116,9 @@ const App = {
   startPolling(orderId) {
     const tick = async (silent = true) => {
       try {
-        const resp = await $.getJSON(`/api/qris/status/${encodeURIComponent(orderId)}`);
+        // ✅ status endpoint baru untuk Snap
+        const resp = await $.getJSON(`/api/trx/status/${encodeURIComponent(orderId)}`);
         if (!resp.ok) return;
-
-        if (window.updateStatusBadge) window.updateStatusBadge(resp.status);
 
         if (!silent) {
           if (resp.status === "pending") toastr.info("Menunggu pembayaran…");
@@ -132,28 +142,55 @@ const App = {
 $(document).ready(() => {
   App.init();
 
-  // Create QRIS (AJAX)
+  // ✅ Create Snap Token + Open Snap Popup (AJAX)
   $(document).on("submit", "#formCheckout", async function (e) {
     e.preventDefault();
+
     const payload = {
       itemName: $("#itemName").val(),
       qty: $("#qty").val(),
       amount: $("#amount").val()
     };
 
-    App.showOverlay("Membuat QRIS…");
+    App.showOverlay("Membuat pembayaran…");
     try {
       const resp = await $.ajax({
-        url: "/api/qris/create",
+        url: "/api/snap/create",
         method: "POST",
         contentType: "application/json",
         data: JSON.stringify(payload)
       });
+
       if (!resp.ok) throw new Error(resp.message || "Gagal");
-      toastr.success("QRIS berhasil dibuat");
-      await App.loadPay(resp.orderId, true);
+
+      // pastikan snap.js kebaca
+      if (!window.snap || typeof window.snap.pay !== "function") {
+        throw new Error("Snap.js belum termuat. Pastikan script snap.js + data-client-key ada di app.ejs");
+      }
+
+      toastr.success("Membuka Snap…");
+      App.hideOverlay(); // overlay ditutup sebelum popup muncul
+
+      window.snap.pay(resp.token, {
+        onSuccess: function () {
+          toastr.success("Pembayaran sukses ✅");
+          App.loadSuccess(resp.orderId, true);
+        },
+        onPending: function () {
+          toastr.info("Menunggu pembayaran…");
+          App.startPolling(resp.orderId);
+        },
+        onError: function () {
+          toastr.error("Pembayaran gagal.");
+          App.loadFailed(resp.orderId, true);
+        },
+        onClose: function () {
+          toastr.warning("Popup ditutup. Kamu bisa lanjutkan pembayaran kapan saja.");
+          App.startPolling(resp.orderId);
+        }
+      });
     } catch (err) {
-      const msg = err?.responseJSON?.message || err?.message || "Gagal membuat QRIS.";
+      const msg = err?.responseJSON?.message || err?.message || "Gagal membuat pembayaran.";
       toastr.error(msg);
     } finally {
       App.hideOverlay();
@@ -166,7 +203,7 @@ $(document).ready(() => {
     App.loadCheckout(true);
   });
 
-  // Copy order id
+  // Copy order id (dipakai di success/failed partial kalau ada)
   $(document).on("click", "[data-copy-order]", async function () {
     const orderId = $(this).attr("data-copy-order");
     try {
@@ -177,14 +214,13 @@ $(document).ready(() => {
     }
   });
 
-  // Manual check
+  // Optional: manual check status jika kamu buat tombolnya di UI
   $(document).on("click", "#btnCheckStatus", async function () {
     const orderId = $(this).attr("data-order");
     App.showOverlay("Mengecek status…");
     try {
-      const resp = await $.getJSON(`/api/qris/status/${encodeURIComponent(orderId)}`);
+      const resp = await $.getJSON(`/api/trx/status/${encodeURIComponent(orderId)}`);
       if (!resp.ok) throw new Error(resp.message || "Gagal");
-      if (window.updateStatusBadge) window.updateStatusBadge(resp.status);
 
       if (resp.isFinal) {
         if (resp.status === "settlement" || resp.status === "capture") await App.loadSuccess(orderId, true);
